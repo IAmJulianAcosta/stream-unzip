@@ -3,8 +3,8 @@
 // Existing logic, variable names and explicit‑brace style are preserved.
 
 import {Entry, HttpReader, terminateWorkers, ZipReader} from "@zip.js/zip.js";
-import {BlobFetchQueue} from "./BlobFetchQueue.ts";
-import {BlobProcessingQueue} from "./BlobProcessingQueue.ts";
+import {BlobFetchQueue} from "./BlobFetchQueue";
+import {BlobProcessingQueue} from "./BlobProcessingQueue";
 
 (window as any).benchmarkTimes = (window as any).benchmarkTimes || [];
 

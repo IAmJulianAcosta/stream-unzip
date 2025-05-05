@@ -1,4 +1,4 @@
-import { ExtractionEventType, ZipChunkGroup } from "./StreamingZipExtractorEngine.ts";
+import { ExtractionEventType, ZipChunkGroup } from "./StreamingZipExtractorEngine";
 
 type ChunkGroup = ZipChunkGroup;
 type OnBlobDownloaded = (blob: Blob, label: string, index: number, time: number) => void;

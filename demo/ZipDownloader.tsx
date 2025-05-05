@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import StreamingZipExtractorEngine, {
     ExtractionEventType
-} from "./StreamingZipExtractorEngine.ts";
+} from "../src/StreamingZipExtractorEngine";
 
 interface StreamingZipExtractorProps {
     zipUrl: string;

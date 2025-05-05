@@ -1,8 +1,8 @@
-import {ExtractionEventType, ZipChunkGroup, ZipEntryMetadata} from "./StreamingZipExtractorEngine.ts";
-import {getNestedFileHandle} from "./FsUtils.ts";
-import flate from "./wasm-flate/wasm-flate.ts";
+import {ExtractionEventType, ZipChunkGroup, ZipEntryMetadata} from "./StreamingZipExtractorEngine";
+import {getNestedFileHandle} from "./FsUtils";
+import flate from "./wasm-flate/wasm-flate";
 import {decompressSync} from 'fflate';
-import {UnzipWorker} from "./UnzipWorker.ts";
+import {UnzipWorker} from "./UnzipWorker";
 
 /**
  * Manages parallel decompression of downloaded ZIP chunk groups using a fixed pool of Web Workers.
