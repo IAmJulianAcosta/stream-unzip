@@ -4,7 +4,10 @@ export class UnzipWorker {
     private log?: (msg: string) => void;
     private jobIdCounter: number = 0;
 
-    constructor(log?: (msg: string) => void) {
+    constructor(
+        log?: (msg: string) => void,
+        writePause: number = 100,
+    ) {
         (window as any).workerAmount++;
         this.log = log;
 
@@ -12,7 +15,7 @@ export class UnzipWorker {
             importScripts('https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js');
         
             // ★ configurable pause between writes (in milliseconds)
-            const WRITE_PAUSE_MS = 100;
+            const WRITE_PAUSE_MS = ${writePause};
         
             async function sleep(ms) {
                 return new Promise((r) => { setTimeout(r, ms); });
@@ -45,7 +48,7 @@ export class UnzipWorker {
         `;
 
         const blobURL: string = URL.createObjectURL(
-            new Blob([workerSource], { type: "application/javascript" })
+            new Blob([workerSource], {type: "application/javascript"})
         );
 
         this.worker = new Worker(blobURL);
@@ -53,7 +56,7 @@ export class UnzipWorker {
         this.log && this.log(`Created a new worker, amount ${(window as any).workerAmount}`);
 
         this.worker.onmessage = (e: MessageEvent) => {
-            const { id, data, error } = e.data;
+            const {id, data, error} = e.data;
             const resolve = this.pendingJobs.get(id);
             if (resolve === undefined) {
                 return;
@@ -71,14 +74,14 @@ export class UnzipWorker {
     }
 
     public async decompress(input: Uint8Array): Promise<Uint8Array> {
-        return await this.enqueue("inflate", { compressed: input }, [input.buffer]);
+        return await this.enqueue("inflate", {compressed: input}, [input.buffer]);
     }
 
     public async writeFile(
         handle: FileSystemFileHandle,
         data: Uint8Array
     ): Promise<void> {
-        await this.enqueue("write", { fileHandle: handle, bytes: data }, [data.buffer]);
+        await this.enqueue("write", {fileHandle: handle, bytes: data}, [data.buffer]);
         return;
     }
 
@@ -91,7 +94,7 @@ export class UnzipWorker {
             const id: number = this.jobIdCounter++;
             this.pendingJobs.set(id, resolve);
             try {
-                this.worker.postMessage({ id, type, ...payload }, transfers);
+                this.worker.postMessage({id, type, ...payload}, transfers);
             } catch (err) {
                 this.pendingJobs.delete(id);
                 reject(err);

@@ -32,6 +32,7 @@ export class BlobProcessingQueue {
      * @param workerPoolSize    Number of concurrent workers to use for decompression.
      * @param expectedUnzipTasks
      * @param preferredMethod
+     * @param writePause
      */
     constructor(
         private readonly onProgress: (currentBytes: number, filename: string) => void,
@@ -40,6 +41,7 @@ export class BlobProcessingQueue {
         expectedUnzipTasks: number,
         preferredMethod = "worker",
         workerPoolSize?: number,
+        writePause?: number
     ) {
         this.remainingTasks = expectedUnzipTasks;
 
@@ -56,7 +58,7 @@ export class BlobProcessingQueue {
         this.log(`workerPoolSize set to ${workerPoolSize}`);
 
         for (let i = 0; i < workerPoolSize; i++) {
-            this.workers.push(new UnzipWorker(log));
+            this.workers.push(new UnzipWorker(log, writePause));
         }
 
 

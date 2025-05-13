@@ -35,6 +35,7 @@ export type StreamingZipExtractorOptions = {
     workerPoolSize?: number;
     sequentialUnzip?: boolean;
     preferredMethod?: "worker" | "wasm" | "sync" | undefined;
+    writePause?: number;
 };
 
 export default class StreamingZipExtractorEngine {
@@ -60,7 +61,8 @@ export default class StreamingZipExtractorEngine {
     private workerPoolSize?: number;
     private sequentialUnzip: boolean;
     private deferredChunks: {blob: Blob; group: ZipChunkGroup; index: number}[] = [];
-    private preferredMethod:  "worker" | "wasm" | "sync" | undefined;
+    private preferredMethod?:  "worker" | "wasm" | "sync";
+    private writePause?: number;
 
     constructor(
         onProgress: (
@@ -71,7 +73,7 @@ export default class StreamingZipExtractorEngine {
         ) => void,
         onEvent: (type: ExtractionEventType, message: string) => void,
         outputDirHandle: FileSystemDirectoryHandle,
-        options?: StreamingZipExtractorOptions
+        options?: StreamingZipExtractorOptions,
     ) {
         this.onProgress = onProgress;
         this.onEvent = onEvent;
@@ -83,6 +85,7 @@ export default class StreamingZipExtractorEngine {
         this.workerPoolSize = options?.workerPoolSize;
         this.sequentialUnzip = options?.sequentialUnzip ?? false;
         this.preferredMethod = options?.preferredMethod
+        this.writePause = options?.writePause
     }
 
     public updateProgress = (currentBytes: number, filename: string) => {
@@ -130,7 +133,8 @@ export default class StreamingZipExtractorEngine {
             this.log.bind(this),
             fileEntries.length,
             this.preferredMethod,
-            this.sequentialUnzip ? 1 : this.workerPoolSize
+            this.sequentialUnzip ? 1 : this.workerPoolSize,
+            this.writePause,
         );
 
         this.blobFetchQueue = new BlobFetchQueue(
