@@ -21,7 +21,7 @@ export class BlobProcessingQueue {
     private _done!: () => void;
     public readonly done: Promise<void>
 
-    private static MAXIMUM_ALLOWED_WORKERS = Math.max(10, Math.floor(navigator.hardwareConcurrency * 5));
+    private static MAXIMUM_ALLOWED_WORKERS = Math.max(4, Math.floor(navigator.hardwareConcurrency / 1.5));
 
     /**
      * @param onProgress        Callback invoked after each file entry is unzipped to report progress.
@@ -58,13 +58,6 @@ export class BlobProcessingQueue {
         this.done = new Promise<void>((resolve) => {
             this._done = resolve;
         });
-    }
-
-    /**
-     * Terminates all active workers immediately.
-     */
-    public terminate(): void {
-        this.workers.forEach(worker => worker.terminate());
     }
 
     /**
@@ -187,7 +180,6 @@ export class BlobProcessingQueue {
         await writable.close();
 
         onComplete(decompressed.length);
-        this.onEvent(ExtractionEventType.FileUnzipped, entry.filename);
 
         this.remainingTasks--;
         if (this.remainingTasks === 0) {
@@ -256,6 +248,17 @@ export class BlobProcessingQueue {
         }
 
         return decompressSync(compressed);
+    }
+
+    /**
+     * Terminates all active workers immediately.
+     */
+    public terminate(): void {
+        this.workers.forEach((worker) => {
+            console.log(`Terminating worker... ${worker}`);
+            worker.terminate();
+            console.log(`Worker ${worker} terminated`);
+        });
     }
 
 }

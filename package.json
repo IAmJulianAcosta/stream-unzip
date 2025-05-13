@@ -1,6 +1,6 @@
 {
   "name": "stream-unzip",
-  "version": "1.1.4",
+  "version": "1.1.7",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [

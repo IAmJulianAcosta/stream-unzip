@@ -46,12 +46,6 @@ export class UnzipWorker {
         return await this.decompressWithWorker(input);
     }
 
-    public terminate(): void {
-        this.worker.terminate();
-        this.pendingJobs.clear();
-        this.log?.(`[UnzipWorker] Terminated`);
-    }
-
     private decompressWithWorker(compressed: Uint8Array): Promise<Uint8Array> {
         return new Promise((resolve, reject) => {
             const id = this.jobIdCounter++;
@@ -63,5 +57,11 @@ export class UnzipWorker {
                 reject(err);
             }
         });
+    }
+
+    public terminate(): void {
+        this.worker.terminate();
+        this.pendingJobs.clear();
+        this.log?.(`[UnzipWorker] Terminated`);
     }
 }

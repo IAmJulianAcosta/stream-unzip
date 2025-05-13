@@ -2,7 +2,7 @@
 // v2 – Adds an **internal 20‑worker pool** so each file can be decompressed in parallel.
 // Existing logic, variable names and explicit‑brace style are preserved.
 
-import {Entry, HttpReader, terminateWorkers, ZipReader} from "@zip.js/zip.js";
+import {Entry, HttpReader, ZipReader} from "@zip.js/zip.js";
 import {BlobFetchQueue} from "./BlobFetchQueue";
 import {BlobProcessingQueue} from "./BlobProcessingQueue";
 
@@ -35,7 +35,7 @@ export type StreamingZipExtractorOptions = {
     rangePadding?: number;
     headerOverhead?: number;
     verbosity?: boolean;
-    workerPoolSize?: number; // NEW: allow overriding pool size (default 20)
+    workerPoolSize?: number;
 };
 
 export default class StreamingZipExtractorEngine {
@@ -58,6 +58,7 @@ export default class StreamingZipExtractorEngine {
 
     private totalBytes: number = 0;
     private bytesDone: number = 0;
+    private workerPoolSize?: number;
 
     constructor(
         onProgress: (
@@ -77,6 +78,7 @@ export default class StreamingZipExtractorEngine {
         this.rangePadding = options?.rangePadding ?? 1023;
         this.headerOverhead = options?.headerOverhead ?? 128;
         this.verbosity = options?.verbosity ?? false;
+        this.workerPoolSize = options?.workerPoolSize;
     }
 
     public updateProgress = (currentBytes: number, filename: string) => {
@@ -119,14 +121,6 @@ export default class StreamingZipExtractorEngine {
         const groups = this.groupZipEntriesByChunkSize(metadata, this.chunkSize);
         const totalChunks = groups.length;
 
-
-        this.blobProcessingQueue = new BlobProcessingQueue(
-            this.updateProgress.bind(this),
-            this.onEvent!,
-            this.log.bind(this),
-            fileEntries.length
-        );
-
         this.blobFetchQueue = new BlobFetchQueue(
             zipUrl,
             groups,
@@ -144,13 +138,21 @@ export default class StreamingZipExtractorEngine {
             this.rangePadding
         );
 
+        this.blobProcessingQueue = new BlobProcessingQueue(
+            this.updateProgress.bind(this),
+            this.onEvent!,
+            this.log.bind(this),
+            fileEntries.length,
+            this.workerPoolSize,
+        );
+
         this.blobFetchQueue.start();
+
         await Promise.all([
             this.blobFetchQueue.done,
             this.blobProcessingQueue.done,
         ]);
 
-        terminateWorkers();
         this.blobProcessingQueue.terminate();
 
         this.log("All chunks processed");
