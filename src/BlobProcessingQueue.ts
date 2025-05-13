@@ -19,9 +19,12 @@ export class BlobProcessingQueue {
 
     private remainingTasks: number;
     private _done!: () => void;
-    public readonly done: Promise<void>
+    public readonly done: Promise<void>;
 
     private static MAXIMUM_ALLOWED_WORKERS = Math.max(4, Math.floor(navigator.hardwareConcurrency / 1.5));
+
+    // round-robin index for file-write delegation
+    private nextWriteWorkerIndex: number = 0;
 
     /**
      * @param onProgress        Callback invoked after each file entry is unzipped to report progress.
@@ -43,13 +46,13 @@ export class BlobProcessingQueue {
             if (workerPoolSize > BlobProcessingQueue.MAXIMUM_ALLOWED_WORKERS) {
                 workerPoolSize = BlobProcessingQueue.MAXIMUM_ALLOWED_WORKERS;
             }
-            workerPoolSize = Math.max(1, workerPoolSize); // Ensure it's not 0
-            console.warn(`workerPoolSize (${workerPoolSize}) larger then the maximum ${BlobProcessingQueue.MAXIMUM_ALLOWED_WORKERS}`)
+            console.warn(`workerPoolSize (${workerPoolSize}) larger then the maximum ${BlobProcessingQueue.MAXIMUM_ALLOWED_WORKERS}`);
         } else {
             workerPoolSize = BlobProcessingQueue.MAXIMUM_ALLOWED_WORKERS;
         }
+        workerPoolSize = Math.max(1, workerPoolSize); // Ensure it's not 0
 
-        console.log(`workerPoolSize set to ${workerPoolSize}`)
+        console.log(`workerPoolSize set to ${workerPoolSize}`);
 
         for (let i = 0; i < workerPoolSize; i++) {
             this.workers.push(new UnzipWorker(log));
@@ -63,20 +66,13 @@ export class BlobProcessingQueue {
     /**
      * Queues a group of ZIP entries for decompression and returns a promise
      * that resolves once the entire group has been processed.
-     *
-     * @param blob        The downloaded chunk blob containing compressed entries.
-     * @param group       Metadata describing the offset and entries in the chunk.
-     * @param index       Zero-based index of this chunk in the full sequence.
-     * @param totalChunks Total number of chunks to process.
-     * @param outputDir   FileSystemDirectoryHandle where decompressed files are written.
-     * @returns           Promise that resolves when this chunk group is fully unzipped.
      */
     public processGroupBlob(
         blob: Blob,
         group: ZipChunkGroup,
         index: number,
         totalChunks: number,
-        outputDir: FileSystemDirectoryHandle
+        outputDir: FileSystemDirectoryHandle,
     ): Promise<void> {
         const label = `chunk ${index + 1}/${totalChunks}`;
         const uzStart = performance.now();
@@ -99,7 +95,7 @@ export class BlobProcessingQueue {
                     (bytes) => {
                         this.bytesDone += bytes;
                         this.onProgress(bytes, entry.filename);
-                    }
+                    },
                 );
                 extractTasks.push(t);
             }
@@ -121,10 +117,11 @@ export class BlobProcessingQueue {
 
     /**
      * Internal scheduler that runs queued tasks as workers become available.
-     * Ensures no more than one task per worker is active at once.
      */
     private scheduleNextTask(): void {
-        if (this.activeTasks.size >= this.workers.length) return;
+        if (this.activeTasks.size >= this.workers.length) {
+            return;
+        }
 
         const task = this.taskQueue.shift();
         if (task) {
@@ -138,19 +135,13 @@ export class BlobProcessingQueue {
 
     /**
      * Decompresses a single ZIP entry and writes it to the file system.
-     *
-     * @param entry        Metadata for the ZIP entry (offsets, filename, sizes).
-     * @param blob         The blob containing the compressed data for this group.
-     * @param baseOffset   Offset within the blob where this group begins.
-     * @param outputDir    Directory handle for writing the decompressed file.
-     * @param onComplete   Callback invoked with the number of bytes written.
      */
     private async processEntry(
         entry: ZipEntryMetadata,
         blob: Blob,
         baseOffset: number,
         outputDir: FileSystemDirectoryHandle,
-        onComplete: (decompressedBytes: number) => void
+        onComplete: (decompressedBytes: number) => void,
     ): Promise<void> {
         if (entry.directory) {
             this.log(`[UNZIP] Skipping directory: ${entry.filename}`);
@@ -173,13 +164,16 @@ export class BlobProcessingQueue {
         const sliceBuffer = new Uint8Array(await sliceBlob.arrayBuffer());
 
         const decompressed = await this.extractDeflateStream(sliceBuffer, compSize);
+        const decompressedLength = decompressed.length;
 
         const fileHandle = await getNestedFileHandle(outputDir, entry.filename);
-        const writable = await fileHandle.createWritable();
-        await writable.write(decompressed);
-        await writable.close();
 
-        onComplete(decompressed.length);
+        // delegate disk write to a worker (uses new UnzipWorker.writeFile)
+        const writeWorker = this.workers[this.nextWriteWorkerIndex];
+        this.nextWriteWorkerIndex = (this.nextWriteWorkerIndex + 1) % this.workers.length;
+        await writeWorker.writeFile(fileHandle, decompressed);
+
+        onComplete(decompressedLength);
 
         this.remainingTasks--;
         if (this.remainingTasks === 0) {
@@ -190,18 +184,12 @@ export class BlobProcessingQueue {
 
     /**
      * Extracts raw DEFLATE data from a ZIP entry buffer.
-     * Tries the pool of Web Workers first, then falls back to wasm-flate, then fflate.
-     *
-     * @param buffer                 Full entry buffer (including local header + compressed data).
-     * @param fallbackCompressedSize Expected compressedSize from metadata if header field is zero.
-     * @returns                      Decompressed bytes.
      */
-        // Add this at the top of your class:
     private nextWorkerIndex: number = 0;
 
     private async extractDeflateStream(
         buffer: Uint8Array,
-        fallbackCompressedSize: number
+        fallbackCompressedSize: number,
     ): Promise<Uint8Array> {
         const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 
@@ -211,7 +199,8 @@ export class BlobProcessingQueue {
         }
 
         const compressionMethod = view.getUint16(8, true);
-        if (compressionMethod !== 8) {
+
+        if (compressionMethod !== 8 && compressionMethod !== 0) {
             throw new Error(`Unsupported compression method: ${compressionMethod}`);
         }
 
@@ -230,7 +219,10 @@ export class BlobProcessingQueue {
 
         const compressed = buffer.subarray(dataStart, dataStart + compressedSize);
 
-        // Round‑robin selection of the next worker
+        if (compressionMethod === 0) {
+            return compressed;
+        }
+
         const worker = this.workers[this.nextWorkerIndex];
         this.nextWorkerIndex = (this.nextWorkerIndex + 1) % this.workers.length;
 

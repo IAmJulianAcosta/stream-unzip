@@ -1,57 +1,83 @@
 export class UnzipWorker {
     private worker: Worker;
-    private jobIdCounter: number = 0;
-    private pendingJobs: Map<number, (data: Uint8Array) => void> = new Map();
+    private pendingJobs: Map<number, (value: any) => void> = new Map();
     private log?: (msg: string) => void;
+    private jobIdCounter: number = 0;
 
     constructor(log?: (msg: string) => void) {
         this.log = log;
 
         const workerSource = `
             importScripts('https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js');
-            self.onmessage = function(e) {
-                const { id, compressed } = e.data;
+
+            async function writeFile(handle, bytes) {
+                const writable = await handle.createWritable();
+                await writable.write(bytes);
+                await writable.close();
+            }
+
+            self.onmessage = async function (e) {
+                const { id, type, compressed, fileHandle, bytes } = e.data;
                 try {
-                    const decompressed = fflate.decompressSync(new Uint8Array(compressed));
-                    self.postMessage({ id, data: decompressed }, [decompressed.buffer]);
+                    if (type === 'inflate') {
+                        const result = fflate.decompressSync(new Uint8Array(compressed));
+                        self.postMessage({ id, data: result }, [result.buffer]);
+                    } else if (type === 'write') {
+                        await writeFile(fileHandle, new Uint8Array(bytes));
+                        self.postMessage({ id, data: bytes.length });
+                    }
                 } catch (err) {
                     self.postMessage({ id, error: err.message });
                 }
             };
         `;
-        const blobURL = URL.createObjectURL(
+
+        const blobURL: string = URL.createObjectURL(
             new Blob([workerSource], { type: "application/javascript" })
         );
 
         this.worker = new Worker(blobURL);
+
         this.worker.onmessage = (e: MessageEvent) => {
             const { id, data, error } = e.data;
             const resolve = this.pendingJobs.get(id);
-            if (!resolve) return;
-
+            if (resolve === undefined) {
+                return;
+            }
             this.pendingJobs.delete(id);
-            if (error) {
-                this.log?.(`[UnzipWorker] Decompression failed for id=${id}: ${error}`);
+            if (error !== undefined) {
+                this.log?.(`[UnzipWorker] Job \${id} failed: \${error}`);
                 resolve(Promise.reject(new Error(error)) as unknown as Uint8Array);
             } else {
-                // this.log?.(`[UnzipWorker] Decompression succeeded for id=${id}`);
                 resolve(data);
             }
         };
 
-        this.log?.(`[UnzipWorker] Initialized`);
+        this.log?.("[UnzipWorker] Initialized");
     }
 
     public async decompress(input: Uint8Array): Promise<Uint8Array> {
-        return await this.decompressWithWorker(input);
+        return await this.enqueue("inflate", { compressed: input }, [input.buffer]);
     }
 
-    private decompressWithWorker(compressed: Uint8Array): Promise<Uint8Array> {
+    public async writeFile(
+        handle: FileSystemFileHandle,
+        data: Uint8Array
+    ): Promise<void> {
+        await this.enqueue("write", { fileHandle: handle, bytes: data }, [data.buffer]);
+        return;
+    }
+
+    private enqueue(
+        type: "inflate" | "write",
+        payload: Record<string, unknown>,
+        transfers: Transferable[]
+    ): Promise<any> {
         return new Promise((resolve, reject) => {
-            const id = this.jobIdCounter++;
+            const id: number = this.jobIdCounter++;
             this.pendingJobs.set(id, resolve);
             try {
-                this.worker.postMessage({ id, compressed }, [compressed.buffer]);
+                this.worker.postMessage({ id, type, ...payload }, transfers);
             } catch (err) {
                 this.pendingJobs.delete(id);
                 reject(err);
@@ -62,6 +88,6 @@ export class UnzipWorker {
     public terminate(): void {
         this.worker.terminate();
         this.pendingJobs.clear();
-        this.log?.(`[UnzipWorker] Terminated`);
+        this.log?.("[UnzipWorker] Terminated");
     }
 }
