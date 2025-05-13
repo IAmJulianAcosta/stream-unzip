@@ -23,8 +23,7 @@ export class BlobProcessingQueue {
 
     private static MAXIMUM_ALLOWED_WORKERS = Math.max(4, Math.floor(navigator.hardwareConcurrency / 1.5));
 
-    // round-robin index for file-write delegation
-    private nextWriteWorkerIndex: number = 0;
+    private order: Array<"worker" | "wasm" | "sync">
 
     /**
      * @param onProgress        Callback invoked after each file entry is unzipped to report progress.
@@ -32,12 +31,14 @@ export class BlobProcessingQueue {
      * @param log               Optional logger for debug output.
      * @param workerPoolSize    Number of concurrent workers to use for decompression.
      * @param expectedUnzipTasks
+     * @param preferredMethod
      */
     constructor(
         private readonly onProgress: (currentBytes: number, filename: string) => void,
         private readonly onEvent: (type: ExtractionEventType, message: string) => void,
         private readonly log: (msg: string) => void,
         expectedUnzipTasks: number,
+        preferredMethod = "worker",
         workerPoolSize?: number,
     ) {
         this.remainingTasks = expectedUnzipTasks;
@@ -45,22 +46,35 @@ export class BlobProcessingQueue {
         if (typeof workerPoolSize === "number") {
             if (workerPoolSize > BlobProcessingQueue.MAXIMUM_ALLOWED_WORKERS) {
                 workerPoolSize = BlobProcessingQueue.MAXIMUM_ALLOWED_WORKERS;
+                console.warn(`workerPoolSize (${workerPoolSize}) larger then the maximum ${BlobProcessingQueue.MAXIMUM_ALLOWED_WORKERS}`);
             }
-            console.warn(`workerPoolSize (${workerPoolSize}) larger then the maximum ${BlobProcessingQueue.MAXIMUM_ALLOWED_WORKERS}`);
         } else {
             workerPoolSize = BlobProcessingQueue.MAXIMUM_ALLOWED_WORKERS;
         }
         workerPoolSize = Math.max(1, workerPoolSize); // Ensure it's not 0
 
-        console.log(`workerPoolSize set to ${workerPoolSize}`);
+        this.log(`workerPoolSize set to ${workerPoolSize}`);
 
         for (let i = 0; i < workerPoolSize; i++) {
             this.workers.push(new UnzipWorker(log));
         }
 
+
         this.done = new Promise<void>((resolve) => {
             this._done = resolve;
         });
+
+        this.order = (() => {
+            if (preferredMethod === "wasm") {
+                return ["wasm", "worker", "sync"];
+            }
+            if (preferredMethod === "sync") {
+                return ["sync", "worker", "wasm"];
+            }
+            return ["worker", "wasm", "sync"]; // default
+        })();
+
+        this.log?.(`Preferred method: ${this.order}`);
     }
 
     /**
@@ -84,10 +98,17 @@ export class BlobProcessingQueue {
 
         const task = async () => {
             this.log(`[UNZIP] Unzip starting for ${label}`);
-            const extractTasks: Promise<void>[] = [];
+
+            const workerSlots: Promise<void>[] = this.workers.map(() => Promise.resolve());
 
             for (const entry of group.entries) {
-                const t = this.processEntry(
+                // wait until the first worker slot finishes; get its index
+                const slotIndex: number = await Promise.race(
+                    workerSlots.map((p, i) => p.then(() => i)),
+                );
+
+                // launch the new task in that slot
+                workerSlots[slotIndex] = this.processEntry(
                     entry,
                     blob,
                     group.start,
@@ -96,11 +117,12 @@ export class BlobProcessingQueue {
                         this.bytesDone += bytes;
                         this.onProgress(bytes, entry.filename);
                     },
+                    this.workers[slotIndex],
                 );
-                extractTasks.push(t);
             }
 
-            await Promise.all(extractTasks);
+            // wait for the last wave of worker slots to finish
+            await Promise.all(workerSlots);
 
             const uzTime = performance.now() - uzStart;
             this.log(`[UNZIP] Unzip complete for ${label}`);
@@ -142,6 +164,7 @@ export class BlobProcessingQueue {
         baseOffset: number,
         outputDir: FileSystemDirectoryHandle,
         onComplete: (decompressedBytes: number) => void,
+        worker: UnzipWorker,
     ): Promise<void> {
         if (entry.directory) {
             this.log(`[UNZIP] Skipping directory: ${entry.filename}`);
@@ -163,15 +186,12 @@ export class BlobProcessingQueue {
         const sliceBlob = blob.slice(offset, dataEnd);
         const sliceBuffer = new Uint8Array(await sliceBlob.arrayBuffer());
 
-        const decompressed = await this.extractDeflateStream(sliceBuffer, compSize);
+        const decompressed = await this.extractDeflateStream(sliceBuffer, compSize, worker);
         const decompressedLength = decompressed.length;
 
         const fileHandle = await getNestedFileHandle(outputDir, entry.filename);
 
-        // delegate disk write to a worker (uses new UnzipWorker.writeFile)
-        const writeWorker = this.workers[this.nextWriteWorkerIndex];
-        this.nextWriteWorkerIndex = (this.nextWriteWorkerIndex + 1) % this.workers.length;
-        await writeWorker.writeFile(fileHandle, decompressed);
+        await worker.writeFile(fileHandle, decompressed);
 
         onComplete(decompressedLength);
 
@@ -185,11 +205,10 @@ export class BlobProcessingQueue {
     /**
      * Extracts raw DEFLATE data from a ZIP entry buffer.
      */
-    private nextWorkerIndex: number = 0;
-
     private async extractDeflateStream(
         buffer: Uint8Array,
         fallbackCompressedSize: number,
+        worker: UnzipWorker,
     ): Promise<Uint8Array> {
         const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 
@@ -199,7 +218,6 @@ export class BlobProcessingQueue {
         }
 
         const compressionMethod = view.getUint16(8, true);
-
         if (compressionMethod !== 8 && compressionMethod !== 0) {
             throw new Error(`Unsupported compression method: ${compressionMethod}`);
         }
@@ -209,9 +227,9 @@ export class BlobProcessingQueue {
             compressedSize = fallbackCompressedSize;
         }
 
-        const filenameLength = view.getUint16(26, true);
+        const filenameLength   = view.getUint16(26, true);
         const extraFieldLength = view.getUint16(28, true);
-        const dataStart = 30 + filenameLength + extraFieldLength;
+        const dataStart        = 30 + filenameLength + extraFieldLength;
 
         if (buffer.length < dataStart + compressedSize) {
             throw new Error("Sliced blob is too small for expected compressed data");
@@ -223,33 +241,34 @@ export class BlobProcessingQueue {
             return compressed;
         }
 
-        const worker = this.workers[this.nextWorkerIndex];
-        this.nextWorkerIndex = (this.nextWorkerIndex + 1) % this.workers.length;
-
-        try {
-            return await worker.decompress(compressed);
-        } catch (workerErr) {
-            this.log(`[UNZIP] Worker inflate failed: ${(workerErr as Error).message}`);
+        for (const method of this.order) {
+            try {
+                if (method === "worker") {
+                    return await worker.decompress(compressed);
+                }
+                if (method === "wasm") {
+                    return await flate.deflate_decode_raw(compressed);
+                }
+                // "sync"
+                return decompressSync(compressed);
+            } catch (err) {
+                this.log?.(`[UNZIP] ${method} inflate failed: ${(err as Error).message}`);
+                // continue to next method in order array
+            }
         }
 
-        try {
-            const decompressed = await flate.deflate_decode_raw(compressed);
-            return decompressed;
-        } catch (wasmErr) {
-            this.log(`[UNZIP] WASM flate failed: ${(wasmErr as Error).message}`);
-        }
-
-        return decompressSync(compressed);
+        throw new Error("All inflate methods failed");
     }
+
 
     /**
      * Terminates all active workers immediately.
      */
     public terminate(): void {
         this.workers.forEach((worker) => {
-            console.log(`Terminating worker... ${worker}`);
+            this.log(`Terminating worker... ${worker}`);
             worker.terminate();
-            console.log(`Worker ${worker} terminated`);
+            this.log(`Worker ${worker} terminated`);
         });
     }
 

@@ -1,12 +1,9 @@
-// StreamingZipExtractorEngine.ts
-// v2 – Adds an **internal 20‑worker pool** so each file can be decompressed in parallel.
-// Existing logic, variable names and explicit‑brace style are preserved.
-
 import {Entry, HttpReader, ZipReader} from "@zip.js/zip.js";
 import {BlobFetchQueue} from "./BlobFetchQueue";
 import {BlobProcessingQueue} from "./BlobProcessingQueue";
 
 (window as any).benchmarkTimes = (window as any).benchmarkTimes || [];
+(window as any).workerAmount = (window as any).workerAmount || [];
 
 export enum ExtractionEventType {
     MetadataDownloaded = "MetadataDownloaded",
@@ -36,6 +33,8 @@ export type StreamingZipExtractorOptions = {
     headerOverhead?: number;
     verbosity?: boolean;
     workerPoolSize?: number;
+    sequentialUnzip?: boolean;
+    preferredMethod?: "worker" | "wasm" | "sync" | undefined;
 };
 
 export default class StreamingZipExtractorEngine {
@@ -59,6 +58,9 @@ export default class StreamingZipExtractorEngine {
     private totalBytes: number = 0;
     private bytesDone: number = 0;
     private workerPoolSize?: number;
+    private sequentialUnzip: boolean;
+    private deferredChunks: {blob: Blob; group: ZipChunkGroup; index: number}[] = [];
+    private preferredMethod:  "worker" | "wasm" | "sync" | undefined;
 
     constructor(
         onProgress: (
@@ -75,18 +77,17 @@ export default class StreamingZipExtractorEngine {
         this.onEvent = onEvent;
         this.outputDirHandle = outputDirHandle;
         this.chunkSize = options?.chunkSize ?? 10 * 1024 * 1024;
-        this.rangePadding = options?.rangePadding ?? 1023;
+        this.rangePadding = options?.rangePadding ?? 1024;
         this.headerOverhead = options?.headerOverhead ?? 128;
         this.verbosity = options?.verbosity ?? false;
         this.workerPoolSize = options?.workerPoolSize;
+        this.sequentialUnzip = options?.sequentialUnzip ?? false;
+        this.preferredMethod = options?.preferredMethod
     }
 
     public updateProgress = (currentBytes: number, filename: string) => {
-        // Update the internal state of the Engine
         this.bytesDone += currentBytes;
         const percent = Math.floor((this.bytesDone / this.totalBytes) * 100);
-
-        // Call the original onProgress passed from the Engine to update the UI
         this.onProgress?.(this.bytesDone, this.totalBytes, filename, percent);
     };
 
@@ -97,10 +98,12 @@ export default class StreamingZipExtractorEngine {
         const now = new Date();
         const timestamp = now.toISOString().replace("T", " ").replace("Z", "");
         const ms = now.getMilliseconds().toString().padStart(3, "0");
-        console.log(`[${timestamp}.${ms}] [Extractor] ${message}`);
+        this.log(`[${timestamp}.${ms}] [Extractor] ${message}`);
     }
 
     public async extract(zipUrl: string): Promise<void> {
+        (window as any).workerAmount = 0;
+
         this.log(`Starting extraction from: ${zipUrl}`);
         this.onEvent?.(ExtractionEventType.Info, "Fetching metadata and selecting output folder...");
 
@@ -121,15 +124,28 @@ export default class StreamingZipExtractorEngine {
         const groups = this.groupZipEntriesByChunkSize(metadata, this.chunkSize);
         const totalChunks = groups.length;
 
+        this.blobProcessingQueue = new BlobProcessingQueue(
+            this.updateProgress.bind(this),
+            this.onEvent!,
+            this.log.bind(this),
+            fileEntries.length,
+            this.preferredMethod,
+            this.sequentialUnzip ? 1 : this.workerPoolSize
+        );
+
         this.blobFetchQueue = new BlobFetchQueue(
             zipUrl,
             groups,
             (blob, _, index) => {
                 try {
-                    this.unzipBlog(blob, groups[index], index, totalChunks, outputDirHandle)
-                }
-                catch (error) {
-                    this.log(`Error in chunk ${index}: ${error}`)
+                    const group = groups[index];
+                    if (this.sequentialUnzip) {
+                        this.deferredChunks.push({blob, group, index});
+                    } else {
+                        this.unzipBlob(blob, group, index, totalChunks, outputDirHandle);
+                    }
+                } catch (error) {
+                    this.log(`Error in chunk ${index}: ${error}`);
                 }
             },
             6,
@@ -138,40 +154,41 @@ export default class StreamingZipExtractorEngine {
             this.rangePadding
         );
 
-        this.blobProcessingQueue = new BlobProcessingQueue(
-            this.updateProgress.bind(this),
-            this.onEvent!,
-            this.log.bind(this),
-            fileEntries.length,
-            this.workerPoolSize,
-        );
-
         this.blobFetchQueue.start();
 
-        await Promise.all([
-            this.blobFetchQueue.done,
-            this.blobProcessingQueue.done,
-        ]);
+        if (this.sequentialUnzip) {
+            await this.blobFetchQueue.done;
+            this.deferredChunks
+                .sort((a, b) => a.index - b.index)
+                .forEach(async chunk => {
+                    await this.unzipBlob(chunk.blob, chunk.group, chunk.index, totalChunks, outputDirHandle);
+                });
+            await this.blobProcessingQueue.done;
+        } else {
+            await Promise.all([
+                this.blobFetchQueue.done,
+                this.blobProcessingQueue.done
+            ]);
+        }
 
         this.blobProcessingQueue.terminate();
 
-        this.log("All chunks processed");
+        this.log(`All chunks processed, ${(window as any).workerAmount}`);
         this.onEvent?.(ExtractionEventType.Info, "Extraction complete!");
     }
 
-    private async unzipBlog(
+    private async unzipBlob(
         blob: Blob,
         group: ZipChunkGroup,
         index: number,
         totalChunks: number,
         outputDir: FileSystemDirectoryHandle
     ): Promise<void> {
-        // Await the promise returned by processGroupBlob
-        await this.blobProcessingQueue.processGroupBlob(blob, group, index, totalChunks, outputDir); // Ensure we await this operation before proceeding
+        await this.blobProcessingQueue.processGroupBlob(blob, group, index, totalChunks, outputDir);
     }
 
     private async getZipEntryMetadata(zipUrl: string): Promise<ZipEntryMetadata[]> {
-        const reader = new HttpReader(zipUrl, { useRangeHeader: true });
+        const reader = new HttpReader(zipUrl, {useRangeHeader: true});
         const zipReader = new ZipReader(reader);
         const entries = await zipReader.getEntries();
 
