@@ -188,16 +188,20 @@ export class BlobProcessingQueue {
         const sliceBlob = blob.slice(offset, dataEnd);
         const sliceBuffer = new Uint8Array(await sliceBlob.arrayBuffer());
 
-        const decompressed = await this.extractDeflateStream(sliceBuffer, compSize, worker);
-        const decompressedLength = decompressed.length;
-
-        const fileHandle = await getNestedFileHandle(outputDir, entry.filename);
-
-        await worker.writeFile(fileHandle, decompressed);
-
-        onComplete(decompressedLength);
+        try
+        {
+            const decompressed = await this.extractDeflateStream(sliceBuffer, compSize, worker);
+            const decompressedLength = decompressed.length;
+            const fileHandle = await getNestedFileHandle(outputDir, entry.filename);
+            await worker.writeFile(fileHandle, decompressed);
+            onComplete(decompressedLength);
+        }
+        catch (e) {
+            this.log(e as string);
+        }
 
         this.remainingTasks--;
+        this.log(`${this.remainingTasks}`);
         if (this.remainingTasks === 0) {
             this._done();
         }

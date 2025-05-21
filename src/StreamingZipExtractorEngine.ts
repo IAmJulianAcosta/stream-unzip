@@ -101,7 +101,7 @@ export default class StreamingZipExtractorEngine {
         const now = new Date();
         const timestamp = now.toISOString().replace("T", " ").replace("Z", "");
         const ms = now.getMilliseconds().toString().padStart(3, "0");
-        this.log(`[${timestamp}.${ms}] [Extractor] ${message}`);
+        console.log(`[${timestamp}.${ms}] [Extractor] ${message}`);
     }
 
     public async extract(zipUrl: string): Promise<void> {

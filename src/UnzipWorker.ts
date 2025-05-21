@@ -63,7 +63,7 @@ export class UnzipWorker {
             }
             this.pendingJobs.delete(id);
             if (error !== undefined) {
-                this.log?.(`[UnzipWorker] Job \${id} failed: \${error}`);
+                this.log?.(`[UnzipWorker] Job ${id} failed: ${error}`);
                 resolve(Promise.reject(new Error(error)) as unknown as Uint8Array);
             } else {
                 resolve(data);
